@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Fields of Interest</title>
+
+<link rel="stylesheet" href="https://js.arcgis.com/4.31/esri/themes/light/main.css" />
+<script src="https://js.arcgis.com/4.31/"></script>
+
+<style>
+  html, body, #viewDiv {
+    padding: 0;
+    margin: 0;
+    height: 100%;
+    width: 100%;
+  }
+
+  .remarks-popup {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 240px;
+  }
+
+  .remarks-popup label {
+    font-weight: 600;
+    font-size: 13px;
+  }
+
+  .remarks-popup textarea {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    font-family: inherit;
+    font-size: 13px;
+    padding: 4px;
+  }
+
+  .remarks-popup button {
+    align-self: flex-start;
+    padding: 6px 14px;
+    background: #0079c1;
+    color: #fff;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+
+  .remarks-popup button:disabled {
+    background: #9bb;
+    cursor: default;
+  }
+
+  .remarks-popup .remarks-status {
+    font-size: 12px;
+    min-height: 16px;
+  }
+</style>
+</head>
+<body>
+<div id="viewDiv"></div>
+
+<script>
+  // ---------------------------------------------------------------------
+  // CONFIGURATION
+  // ---------------------------------------------------------------------
+  const CONFIG = {
+    geojsonUrl: "https://raw.githubusercontent.com/Link0923/Fields/main/Fields_of_Interest.geojson",
+    sheetCsvUrl: "https://docs.google.com/spreadsheets/d/e/2PACX-1vS-aRc5AXTNfxjoCUGR_5uS9O_O0hncjqCyIAX7DPeWNKkSQuFw0OwvWWyWZICH-Mh6TWcjlxjwLKeX/pub?gid=0&single=true&output=csv",
+
+    // REQUIRED: paste the Web App URL produced after deploying the Google Apps
+    // Script described in GoogleSheets-Setup.md. Submissions will not work
+    // until this is filled in.
+    appsScriptUrl: "https://script.google.com/macros/s/AKfycbz6tcCjPsHVo6uCp0UNzytekacmOAAwcuQmNjCOFwkmXDRlEVNHn_XSym7OO71eF_yEbQ/exec",
+
+    center: [-106.3459, 35.5989],
+    zoom: 15,
+
+    // RGB(95, 222, 0) requested fill color, not-yet-submitted fields
+    greenFill: [95, 222, 0, 0.55],
+    greenOutline: [60, 140, 0, 1],
+
+    // Fields with a matching "Identification" entry already in the sheet
+    yellowFill: [255, 221, 0, 0.6],
+    yellowOutline: [184, 134, 11, 1]
+  };
+
+  require([
+    "esri/Map",
+    "esri/views/MapView",
+    "esri/Basemap",
+    "esri/layers/TileLayer",
+    "esri/layers/GeoJSONLayer",
+    "esri/renderers/UniqueValueRenderer",
+    "esri/symbols/SimpleFillSymbol",
+    "esri/symbols/SimpleLineSymbol",
+    "esri/symbols/TextSymbol",
+    "esri/PopupTemplate"
+  ], function (
+    Map, MapView, Basemap, TileLayer, GeoJSONLayer,
+    UniqueValueRenderer, SimpleFillSymbol, SimpleLineSymbol, TextSymbol, PopupTemplate
+  ) {
+
+    // -------------------------------------------------------------------
+    // Basemap: World Imagery raster tiles, no ArcGIS API key required
+    // -------------------------------------------------------------------
+    const imageryBasemap = new Basemap({
+      baseLayers: [
+        new TileLayer({
+          url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer",
+          title: "World Imagery"
+        })
+      ],
+      title: "Imagery",
+      id: "imagery"
+    });
+
+    // -------------------------------------------------------------------
+    // Symbols / renderer
+    // -------------------------------------------------------------------
+    function makeFillSymbol(color, outlineColor) {
+      return new SimpleFillSymbol({
+        color: color,
+        outline: new SimpleLineSymbol({ color: outlineColor, width: 1.5 })
+      });
+    }
+
+    const greenSymbol = makeFillSymbol(CONFIG.greenFill, CONFIG.greenOutline);
+    const yellowSymbol = makeFillSymbol(CONFIG.yellowFill, CONFIG.yellowOutline);
+
+    // Set of Label values that already have a submitted "Identification" entry
+    const submittedIds = new Set();
+
+    const fieldsRenderer = new UniqueValueRenderer({
+      field: "Label",
+      defaultSymbol: greenSymbol,
+      uniqueValueInfos: []
+    });
+
+    function refreshRenderer() {
+      const renderer = fieldsRenderer.clone();
+      renderer.uniqueValueInfos = Array.from(submittedIds).map(function (id) {
+        return { value: id, symbol: yellowSymbol };
+      });
+      fieldsLayer.renderer = renderer;
+    }
+
+    // -------------------------------------------------------------------
+    // Label: value of the "Label" field
+    // -------------------------------------------------------------------
+    const labelClass = {
+      symbol: new TextSymbol({
+        color: "white",
+        haloColor: [0, 0, 0, 0.8],
+        haloSize: 1,
+        font: { size: 10, family: "sans-serif", weight: "bold" }
+      }),
+      labelPlacement: "always-horizontal",
+      labelExpressionInfo: { expression: "$feature.Label" }
+    };
+
+    // -------------------------------------------------------------------
+    // Popup: title from Label, custom "Remarks" entry form with Submit
+    // -------------------------------------------------------------------
+    function createPopupContent(event) {
+      const graphic = event.graphic;
+      const identification = graphic.attributes.Label;
+
+      const container = document.createElement("div");
+      container.className = "remarks-popup";
+
+      const label = document.createElement("label");
+      label.textContent = "Remarks";
+
+      const textarea = document.createElement("textarea");
+      textarea.rows = 4;
+      textarea.placeholder = "Enter remarks...";
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Submit";
+
+      const status = document.createElement("div");
+      status.className = "remarks-status";
+
+      button.addEventListener("click", function () {
+        const remarks = textarea.value.trim();
+        if (!remarks) {
+          status.textContent = "Please enter a remark before submitting.";
+          status.style.color = "#b00000";
+          return;
+        }
+        submitRemark(identification, remarks, button, status, textarea);
+      });
+
+      container.appendChild(label);
+      container.appendChild(textarea);
+      container.appendChild(button);
+      container.appendChild(status);
+      return container;
+    }
+
+    function submitRemark(identification, remarks, button, status, textarea) {
+      if (!CONFIG.appsScriptUrl || CONFIG.appsScriptUrl.indexOf("PASTE_YOUR") === 0) {
+        status.textContent = "Submission endpoint is not configured yet.";
+        status.style.color = "#b00000";
+        return;
+      }
+
+      button.disabled = true;
+      status.textContent = "Submitting...";
+      status.style.color = "#444";
+
+      // Sent as text/plain to avoid a CORS preflight request, which Apps
+      // Script web apps do not handle. The response cannot be read back
+      // (mode: "no-cors"), so success is assumed once the request completes.
+      fetch(CONFIG.appsScriptUrl, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ identification: identification, remarks: remarks })
+      })
+        .then(function () {
+          submittedIds.add(identification);
+          refreshRenderer();
+          status.textContent = "Submitted. Thank you!";
+          status.style.color = "#2e7d32";
+          textarea.value = "";
+          button.disabled = false;
+        })
+        .catch(function (err) {
+          console.error("Submission failed:", err);
+          status.textContent = "Submission failed. Please try again.";
+          status.style.color = "#b00000";
+          button.disabled = false;
+        });
+    }
+
+    const popupTemplate = new PopupTemplate({
+      title: "{Label}",
+      outFields: ["*"],
+      content: createPopupContent
+    });
+
+    // -------------------------------------------------------------------
+    // Fields of Interest layer
+    // -------------------------------------------------------------------
+    const fieldsLayer = new GeoJSONLayer({
+      url: CONFIG.geojsonUrl,
+      title: "Fields of Interest",
+      renderer: fieldsRenderer,
+      labelingInfo: [labelClass],
+      labelsVisible: true,
+      popupTemplate: popupTemplate,
+      outFields: ["*"]
+    });
+
+    // -------------------------------------------------------------------
+    // CSV parsing (handles quoted fields containing commas/newlines)
+    // -------------------------------------------------------------------
+    function parseCsv(text) {
+      const rows = [];
+      let row = [], field = "", inQuotes = false;
+
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (inQuotes) {
+          if (c === '"') {
+            if (text[i + 1] === '"') { field += '"'; i++; }
+            else { inQuotes = false; }
+          } else {
+            field += c;
+          }
+        } else if (c === '"') {
+          inQuotes = true;
+        } else if (c === ',') {
+          row.push(field);
+          field = "";
+        } else if (c === '\n' || c === '\r') {
+          if (c === '\r' && text[i + 1] === '\n') { i++; }
+          row.push(field);
+          rows.push(row);
+          row = [];
+          field = "";
+        } else {
+          field += c;
+        }
+      }
+      if (field.length || row.length) {
+        row.push(field);
+        rows.push(row);
+      }
+      return rows.filter(function (r) { return !(r.length === 1 && r[0] === ""); });
+    }
+
+    // Reads the published sheet and records which Identification values
+    // already exist, so those fields can be drawn yellow on load.
+    function loadSubmittedIdentifications() {
+      const bustUrl = CONFIG.sheetCsvUrl +
+        (CONFIG.sheetCsvUrl.indexOf("?") > -1 ? "&" : "?") + "cb=" + Date.now();
+
+      return fetch(bustUrl)
+        .then(function (resp) { return resp.text(); })
+        .then(function (text) {
+          const rows = parseCsv(text);
+          if (!rows.length) { return; }
+
+          const header = rows[0].map(function (h) { return h.trim().toLowerCase(); });
+          const idIdx = header.indexOf("identification");
+          if (idIdx === -1) { return; }
+
+          for (let i = 1; i < rows.length; i++) {
+            const value = (rows[i][idIdx] || "").trim();
+            if (value) { submittedIds.add(value); }
+          }
+        })
+        .catch(function (err) {
+          console.warn("Could not load existing submissions:", err);
+        });
+    }
+
+    // -------------------------------------------------------------------
+    // Map & view
+    // -------------------------------------------------------------------
+    const map = new Map({
+      basemap: imageryBasemap,
+      layers: [fieldsLayer]
+    });
+
+    const view = new MapView({
+      container: "viewDiv",
+      map: map,
+      center: CONFIG.center,
+      zoom: CONFIG.zoom
+    });
+
+    view.when(function () {
+      loadSubmittedIdentifications().then(refreshRenderer);
+    });
+  });
+</script>
+</body>
+</html>
